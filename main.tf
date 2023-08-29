@@ -1,29 +1,36 @@
 
-provider "aws" {
-  region = "ap-northeast-1"
-}
-
-variable "domain" {
-  type = string
-}
-
-variable "recipients" {
-  type = list(string)
-}
-
-variable "ses_identities" {
-  type = list(string)
-}
 
 data "aws_caller_identity" "this" {}
 
-data "aws_ses_domain_identity" "this" {
-  domain = var.domain
+data "aws_route53_zone" "this" {
+  name = var.zone_name
+}
+
+resource "aws_ses_domain_identity" "this" {
+  domain = var.ses_domain_identity
+}
+
+resource "aws_ses_domain_dkim" "this" {
+  domain = aws_ses_domain_identity.this.domain
+}
+
+resource "aws_route53_record" "this" {
+  count   = 3
+  zone_id = data.aws_route53_zone.this.zone_id
+  name    = "${aws_ses_domain_dkim.this.dkim_tokens[count.index]}._domainkey"
+  type    = "CNAME"
+  ttl     = "600"
+  records = ["${aws_ses_domain_dkim.this.dkim_tokens[count.index]}.dkim.amazonses.com"]
+}
+
+resource "aws_ses_email_identity" "this" {
+  for_each = toset(var.ses_email_identities)
+  email    = each.value
 }
 
 # IAM ポリシーで全許可するなら承認ポリシーで宛先を元に拒否を設定する
 resource "aws_ses_identity_policy" "example" {
-  identity = data.aws_ses_domain_identity.this.arn
+  identity = aws_ses_domain_identity.this.arn
   name     = "example"
   policy = jsonencode({
     "Version" : "2012-10-17",
@@ -31,11 +38,11 @@ resource "aws_ses_identity_policy" "example" {
       {
         "Effect" : "Deny",
         "Action" : ["ses:SendEmail", "ses:SendRawEmail"],
-        "Resource" : data.aws_ses_domain_identity.this.arn,
+        "Resource" : aws_ses_domain_identity.this.arn,
         "Principal" : "*",
         "Condition" : {
           "ForAnyValue:StringNotLike" : {
-            "ses:Recipients" : var.recipients
+            "ses:Recipients" : var.allow_recipients
           }
         }
       }
@@ -68,10 +75,10 @@ resource "aws_iam_role_policy" "ses" {
       {
         "Effect" : "Allow",
         "Action" : ["ses:SendEmail", "ses:SendRawEmail"],
-        "Resource" : var.ses_identities,
+        "Resource" : [aws_ses_domain_identity.this.arn],
         "Condition" : {
-          "ForAnyValue:StringLike" : {
-            "ses:Recipients" : var.recipients
+          "ForAllValues:StringLike" : {
+            "ses:Recipients" : var.allow_recipients
           }
         }
       }
@@ -81,8 +88,4 @@ resource "aws_iam_role_policy" "ses" {
 
 output "iam_role" {
   value = aws_iam_role.ses.arn
-}
-
-output "ses_identity" {
-  value = data.aws_ses_domain_identity.this.arn
 }
